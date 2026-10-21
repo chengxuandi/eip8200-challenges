@@ -298,7 +298,7 @@ theorem run_tail (template : State) (modulus exponent : UInt256) (rest : List UI
   have hk5 : rest.length + 5 < 1024 := by omega
   have hk6 : rest.length + 6 < 1024 := by omega
   have hk7 : rest.length + 7 < 1024 := by omega
-  have hmask : UInt256.isZero (UInt256.ofNat 0) = UInt256.ofNat 1 := by decide
+  have hmask : UInt256.isZero ({ val := 0 } : UInt256) = UInt256.ofNat 1 := by decide
   have hparity := guardedParity_eq modulus exponent hsmall hprime
   by_cases hz : (fermatDiff modulus exponent).toNat = 0 <;>
     simp (config := { maxSteps := 500000 }) [tailProgram, runInstructions, framed,

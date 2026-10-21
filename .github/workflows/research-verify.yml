@@ -17,7 +17,9 @@ concurrency:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Compatibility pin matches the official benchmark's Ubuntu2404 family.
+    # The previous runner-loss cause remains unconfirmed.
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
       - name: Checkout exact research commit
@@ -41,9 +43,11 @@ jobs:
           mkdir -p research-results
           git rev-parse HEAD > research-results/commit.txt
           git status --porcelain > research-results/initial-status.txt
-          uname -a > research-results/runner.txt
-          free -h >> research-results/runner.txt
-          df -h . >> research-results/runner.txt
+          {
+            uname -a
+            free -h
+            df -h .
+          } | tee research-results/runner.txt
           trusted_hash="$(git ls-files -s -- . ':!Challenge/Modexp/Submission/**' ':!Challenge/Ripemd160/Submission/**' | git hash-object --stdin)"
           echo "trusted-hash=${trusted_hash}" >> "${GITHUB_OUTPUT}"
           python3 - <<'PY'
@@ -64,6 +68,12 @@ jobs:
                      "benchmark_command": "BENCHMARK_INSECURE_LOCAL=1 ./benchmark.sh modexp"}
           Path("research-results/source-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
           PY
+
+      - name: Apply research runner resource preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .github/research/prepare-linux-resources.sh 2>&1 | tee research-results/preflight.log
 
       - name: Restore pinned Lean package cache
         id: packages
@@ -96,18 +106,32 @@ jobs:
           BENCHMARK_TOOLS_CACHE_RESTORED: ${{ steps.tools.outputs.cache-hit }}
         run: |
           set -euo pipefail
-          ./setup.sh modexp 2>&1 | tee research-results/setup.log
+          bash .github/research/run-setup-with-telemetry.sh
+
+      - name: Record setup phase readiness without claiming validation
+        id: readiness
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p research-results
+          local_modules_started=false
+          if [[ -f research-results/setup.log ]] && grep -Fq 'checking local module ' research-results/setup.log; then
+            local_modules_started=true
+          fi
+          echo "local-modules-started=${local_modules_started}" >> "${GITHUB_OUTPUT}"
+          printf 'local_modules_started=%s\nscope=setup phase checkpoint only, not proof acceptance\n' "${local_modules_started}" | tee research-results/setup-readiness.txt
 
       # Save only the trusted build state, before benchmark.sh imports candidate Lean.
       - name: Save pinned packages before editable compilation
-        if: steps.setup.outcome == 'success' && steps.packages.outputs.cache-hit != 'true'
+        if: always() && (steps.setup.outcome == 'success' || steps.readiness.outputs.local-modules-started == 'true') && steps.packages.outputs.cache-hit != 'true' && steps.packages.outputs.cache-primary-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lake/packages
           key: ${{ steps.packages.outputs.cache-primary-key }}
 
       - name: Save trusted closure before editable compilation
-        if: steps.setup.outcome == 'success' && steps.trusted.outputs.cache-hit != 'true'
+        if: always() && steps.trusted.outputs.cache-hit != 'true' && steps.trusted.outputs.cache-primary-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -116,13 +140,14 @@ jobs:
           key: ${{ steps.trusted.outputs.cache-primary-key }}
 
       - name: Save pinned benchmark tools
-        if: steps.setup.outcome == 'success' && steps.tools.outputs.cache-hit != 'true'
+        if: always() && (steps.setup.outcome == 'success' || steps.readiness.outputs.local-modules-started == 'true') && steps.tools.outputs.cache-hit != 'true' && steps.tools.outputs.cache-primary-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .benchmark-tools
           key: ${{ steps.tools.outputs.cache-primary-key }}
 
       - name: Run unchanged official proof and scorer in unranked local mode
+        if: success() && steps.setup.outcome == 'success'
         shell: bash
         env:
           BENCHMARK_INSECURE_LOCAL: 1
