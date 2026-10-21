@@ -80,9 +80,31 @@ theorem fermatDiff_one (modulus exponent : UInt256)
   omega
 
 def jumpTailProgram : List Instr := [.push 2 745, .op .JUMP]
+/-- At this guarded prime branch, the difference is either zero or one. Both
+supported primes are odd, so the exponent low bit is exactly that difference.
+Constructing the mask through PUSH0 ISZERO keeps every PC and instruction index
+unchanged while saving one gas versus recomputing modulus + ~exponent. -/
 def tailProgram : List Instr :=
-  [.op .JUMPDEST, .op (.Dup ⟨1, by decide⟩), .op .NOT, .op (.Dup ⟨1, by decide⟩), .op .ADD,
+  [.op .JUMPDEST, .op (.Dup ⟨1, by decide⟩), .push 0 0, .op .ISZERO, .op .AND,
    .push 2 9818, .op .JUMPI]
+
+private theorem guardedParity_eq (modulus exponent : UInt256)
+    (hsmall : (fermatDiff modulus exponent).toNat ≤ 1)
+    (hprime : (FermatProgram.primeValue modulus).toNat ≠ 0) :
+    UInt256.land (UInt256.ofNat 1) exponent = fermatDiff modulus exponent := by
+  have hm := (FermatProgram.primeValue_nonzero modulus).mp hprime
+  by_cases hz : (fermatDiff modulus exponent).toNat = 0
+  · have he := fermatDiff_zero modulus exponent hz
+    have hd : fermatDiff modulus exponent = UInt256.ofNat 0 :=
+      Challenge.EvmProof.Word.word_ext hz
+    rw [hd, ←he]
+    rcases hm with rfl | rfl <;> decide
+  · have ho : (fermatDiff modulus exponent).toNat = 1 := by omega
+    have he := fermatDiff_one modulus exponent ho
+    have hd : fermatDiff modulus exponent = UInt256.ofNat 1 :=
+      Challenge.EvmProof.Word.word_ext ho
+    rw [hd, ←he]
+    rcases hm with rfl | rfl <;> decide
 def inverseGuardProgram : List Instr :=
   [.op .JUMPDEST, .op (.Dup ⟨0, by decide⟩), .push 32 FermatProgram.bn, .op .XOR,
     .push 2 745, .op .JUMPI]
@@ -260,6 +282,8 @@ theorem run_jumpTail (template : State) (rest : List UInt256) (hrest : rest.leng
 
 theorem run_tail (template : State) (modulus exponent : UInt256) (rest : List UInt256)
     (hrest : rest.length ≤ 1000)
+    (hsmall : (fermatDiff modulus exponent).toNat ≤ 1)
+    (hprime : (FermatProgram.primeValue modulus).toNat ≠ 0)
     (htarget : Decode.isValidJumpDest template.executionEnv.code 9818 = true) :
     runInstructions tailProgram
       (framed template (UInt256.ofNat 9800) (modulus :: exponent :: rest)) =
@@ -274,10 +298,11 @@ theorem run_tail (template : State) (modulus exponent : UInt256) (rest : List UI
   have hk5 : rest.length + 5 < 1024 := by omega
   have hk6 : rest.length + 6 < 1024 := by omega
   have hk7 : rest.length + 7 < 1024 := by omega
-  simp only [fermatDiff]
-  by_cases hz : (modulus + UInt256.lnot exponent).toNat = 0 <;>
+  have hmask : UInt256.isZero (UInt256.ofNat 0) = UInt256.ofNat 1 := by decide
+  have hparity := guardedParity_eq modulus exponent hsmall hprime
+  by_cases hz : (fermatDiff modulus exponent).toNat = 0 <;>
     simp (config := { maxSteps := 500000 }) [tailProgram, runInstructions, framed,
-      htarget, hz, UInt256.isTrue, Challenge.EvmProof.Stepper.runInstr, hk0, hk1, hk2, hk3, hk4, hk5, hk6, hk7,
+      hmask, hparity, htarget, hz, UInt256.isTrue, Challenge.EvmProof.Stepper.runInstr, hk0, hk1, hk2, hk3, hk4, hk5, hk6, hk7,
       Challenge.EvmProof.Word.literal_eq_ofNat,
       Challenge.EvmProof.Word.word_toNat_ofNat,
       Challenge.EvmProof.Word.succ_ofNat_mod, Challenge.EvmProof.Word.ofNat_add_mod]

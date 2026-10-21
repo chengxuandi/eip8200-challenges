@@ -160,7 +160,7 @@ def handled {artifact : ProgramArtifact} {fork : Fork}
         paths.prime.steps (ec.transfer rfl rfl) rfl hpraw
       have commonSteps := joinSteps.trans primeSteps
       have htraw := FermatNext.run_tail (context template input) m e (shiftWord input :: tail)
-        (by simp; omega) hinvjump
+        (by simp; omega) hs hp hinvjump
       by_cases he : (FermatNext.fermatDiff m e).toNat = 0
       · rw [if_pos he] at htraw
         have tailSteps : GasSteps (withModulus template input tail 9800) (withModulus template input tail 9809) :=

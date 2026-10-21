@@ -1,0 +1,164 @@
+name: Research MODEXP M01 prevalidation
+run-name: Research M01 parity Linux proof and public gas
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - research/m01-parity
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: research-m01-parity-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout exact research commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          clean: true
+          persist-credentials: false
+
+      - name: Set up pinned Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.24.6
+          cache: false
+
+      - name: Record exact source and candidate identity
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p research-results
+          git rev-parse HEAD > research-results/commit.txt
+          git status --porcelain > research-results/initial-status.txt
+          uname -a > research-results/runner.txt
+          free -h >> research-results/runner.txt
+          df -h . >> research-results/runner.txt
+          trusted_hash="$(git ls-files -s -- . ':!Challenge/Modexp/Submission/**' ':!Challenge/Ripemd160/Submission/**' | git hash-object --stdin)"
+          echo "trusted-hash=${trusted_hash}" >> "${GITHUB_OUTPUT}"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          source = Path("Challenge/Modexp/Submission")
+          code = bytes.fromhex((source / "bytecode.hex").read_text().strip())
+          digest = hashlib.sha256(code).hexdigest()
+          assert digest == "3910039811a6eaea73254c7da6b04566b850cf909199977d165cdc0e702c5801", digest
+          inventory = {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                       for p in sorted(source.rglob("*")) if p.is_file()}
+          receipt = {"kind": "research prevalidation, unranked; no official Yukon result",
+                     "decoded_sha256": digest, "byte_length": len(code),
+                     "submission_inventory": inventory,
+                     "corpus_seed": 0,
+                     "setup_command": "./setup.sh modexp",
+                     "benchmark_command": "BENCHMARK_INSECURE_LOCAL=1 ./benchmark.sh modexp"}
+          Path("research-results/source-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+          PY
+
+      - name: Restore pinned Lean package cache
+        id: packages
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake/packages
+          key: research-lake-packages-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}
+
+      - name: Restore trusted closure before editable compilation
+        id: trusted
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .lake/build
+            .lake/packages/*/.lake/build/ir
+          key: research-modexp-trusted-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.source.outputs.trusted-hash }}
+
+      - name: Restore pinned benchmark tools
+        id: tools
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .benchmark-tools
+          key: research-benchmark-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('setup.sh') }}
+
+      - name: Run unchanged official setup
+        id: setup
+        shell: bash
+        env:
+          BENCHMARK_LAKE_CACHE_RESTORED: ${{ steps.packages.outputs.cache-hit == 'true' && '1' || '0' }}
+          BENCHMARK_TOOLS_CACHE_RESTORED: ${{ steps.tools.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          ./setup.sh modexp 2>&1 | tee research-results/setup.log
+
+      # Save only the trusted build state, before benchmark.sh imports candidate Lean.
+      - name: Save pinned packages before editable compilation
+        if: steps.setup.outcome == 'success' && steps.packages.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake/packages
+          key: ${{ steps.packages.outputs.cache-primary-key }}
+
+      - name: Save trusted closure before editable compilation
+        if: steps.setup.outcome == 'success' && steps.trusted.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .lake/build
+            .lake/packages/*/.lake/build/ir
+          key: ${{ steps.trusted.outputs.cache-primary-key }}
+
+      - name: Save pinned benchmark tools
+        if: steps.setup.outcome == 'success' && steps.tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .benchmark-tools
+          key: ${{ steps.tools.outputs.cache-primary-key }}
+
+      - name: Run unchanged official proof and scorer in unranked local mode
+        shell: bash
+        env:
+          BENCHMARK_INSECURE_LOCAL: 1
+        run: |
+          set -euo pipefail
+          ./benchmark.sh modexp 2>&1 | tee research-results/benchmark.log
+
+      - name: Record final outcome and summarize
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          mkdir -p research-results
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          receipt = {"job_status": os.environ["JOB_STATUS"],
+                     "scope": "research unranked prevalidation; not a Yukon submission",
+                     "score_present": Path("benchmark-results/modexp/score.json").exists()}
+          Path("research-results/outcome.json").write_text(json.dumps(receipt, indent=2) + "\n")
+          PY
+          echo "## Research M01 parity prevalidation" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Unranked Linux run. Only successful unchanged Comparator, independent kernel and protected scorer output can establish local acceptance. No Yukon submission was made." >> "${GITHUB_STEP_SUMMARY}"
+          if [[ -f benchmark-results/modexp/summary.md ]]; then
+            cat benchmark-results/modexp/summary.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload receipts and complete command logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: research-m01-prevalidation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            research-results/
+            benchmark-results/modexp/
+          if-no-files-found: warn
